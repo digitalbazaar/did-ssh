@@ -1,0 +1,69 @@
+#!/usr/bin/env node
+
+/*!
+ * This implementation was based in part on
+ * https://github.com/joyent/node-sshpk
+ * Copyright 2015 Joyent, Inc.  All rights reserved.
+ *
+ * Copyright (c) 2018 Digital Bazaar, Inc. All rights reserved.
+ */
+'use strict';
+
+const bs58 = require('bs58');
+const didIo = require('did-io');
+const fs = require('fs');
+const path = require('path');
+const v1 = didIo.methods.veres();
+const yaml = require('js-yaml');
+const SSHBuffer = require('./ssh-buffer');
+
+const user = process.argv[2];
+
+if(!user) {
+  console.error('The first argument must be a user name.');
+  process.exit(1);
+}
+
+let users;
+try {
+  users = yaml.safeLoad(fs.readFileSync(
+    path.join(__dirname, 'users.yml'), 'utf8'));
+} catch(e) {
+  console.error(e);
+  process.exit(1);
+}
+
+if(!users) {
+  console.error('No users defined in `users.yml`.');
+  process.exit(1);
+}
+
+if(!users[user]) {
+  console.error('Unknown user.');
+  process.exit(1);
+}
+
+const dids = [].concat(users[user]);
+
+try {
+  run();
+} catch(e) {
+  console.error(e);
+  process.exit(1);
+}
+
+async function run() {
+  const promises = dids.map(did => v1.get({did, mode: 'test'}));
+  const docs = await Promise.all(promises);
+  const keys = docs.map(d => d.doc.authentication[0].publicKey[0]);
+  for(const key of keys) {
+    // TODO: add support for additional key types
+    if(key.type === 'Ed25519VerificationKey2018') {
+      let publicKeyBuf = new SSHBuffer({});
+      publicKeyBuf.writeString('ssh-ed25519');
+      publicKeyBuf.writeBuffer(bs58.decode(key.publicKeyBase58));
+      publicKeyBuf = publicKeyBuf.toBuffer();
+      console.log(`ssh-ed25519 ${publicKeyBuf.toString('base64')}`);
+    }
+  }
+}
