@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+
+/*!
+ * This implementation was based in part on
+ * https://github.com/joyent/node-sshpk
+ * Copyright 2015 Joyent, Inc.  All rights reserved.
+ *
+ * Copyright (c) 2018 Digital Bazaar, Inc. All rights reserved.
+ */
+'use strict';
+
+const assert = require('assert-plus');
+const bcrypt = require('bcrypt-pbkdf');
+const bs58 = require('bs58');
+const crypto = require('crypto');
+const dids = require('did-io');
+const fs = require('fs');
+const path = require('path');
+const program = require('commander');
+const v1 = dids.methods.veres();
+const SSHBuffer = require('./ssh-buffer');
+
+const homedir = require('os').homedir();
+
+program
+  .option(
+    '-p, --passphrase [value]',
+    'passphrase used to encrypt the ssh private key')
+  .parse(process.argv);
+
+async function generate() {
+  const didDocument = await v1.generate({});
+  const did = didDocument.id;
+  console.log('New Local DID:', did);
+  const keys = await didDocument.exportKeys();
+  await v1.register({didDocument});
+  console.log('DID successfully registered with the Veres One ledger!');
+  Object.keys(keys).forEach(k => {
+    if(k.endsWith('#authn-key-1')) {
+      const {publicKeyBase58, secretKeyBase58} = keys[k];
+      const pk = bs58.decode(publicKeyBase58);
+      const sk = bs58.decode(secretKeyBase58);
+
+      let publicKeyBuf = new SSHBuffer({});
+      publicKeyBuf.writeString('ssh-ed25519');
+      publicKeyBuf.writeBuffer(pk);
+      publicKeyBuf = publicKeyBuf.toBuffer();
+
+      const pubBuf = Buffer.from(
+        `ssh-ed25519 ${publicKeyBuf.toString('base64')} ${did}\n`);
+
+      // write public key file
+      fs.writeFileSync(path.join(homedir, '.ssh', `${did}.pub`), pubBuf);
+
+      const MAGIC = 'openssh-key-v1';
+      let cipher = 'none';
+      let kdf = 'none';
+      let kdfopts = Buffer.alloc(0);
+      let cinf = {blockSize: 8};
+      let privBuf = new SSHBuffer({});
+      const checkInt = crypto.randomBytes(4).readUInt32BE(0);
+      privBuf.writeInt(checkInt);
+      privBuf.writeInt(checkInt);
+      privBuf.write(publicKeyBuf);
+      // sk is 32 bytes private key followedd by 32 bytes public key
+      privBuf.writeBuffer(sk);
+      privBuf.writeString(did); // comment
+      let n = 1;
+      // add padding of incrementing integer bytes
+      while(privBuf._offset % cinf.blockSize !== 0) {
+        privBuf.writeChar(n++);
+      }
+      privBuf = privBuf.toBuffer();
+
+      // if a passphrase was specified, encrypt the private key
+      if(program.passphrase) {
+        assert.string(program.passphrase, 'passphrase');
+        kdf = 'bcrypt';
+        // cipher info for aes256-ctr, the default cipher in ssh-keygen
+        cipher = 'aes256-ctr';
+        cinf = {blockSize: 16, keySize: 32, opensslName: cipher};
+        const passphrase = Buffer.from(program.passphrase);
+        assert.buffer(passphrase, 'passphrase');
+        const salt = crypto.randomBytes(16);
+        const rounds = 16;
+        const kdfssh = new SSHBuffer({});
+        kdfssh.writeBuffer(salt);
+        kdfssh.writeInt(rounds);
+        kdfopts = kdfssh.toBuffer();
+
+        const pass = new Uint8Array(passphrase);
+        const salti = new Uint8Array(salt);
+        /* Use the pbkdf to derive both the key and the IV. */
+        let out = new Uint8Array(cinf.keySize + cinf.blockSize);
+        const res = bcrypt.pbkdf(pass, pass.length, salti, salti.length,
+          out, out.length, rounds);
+        if(res !== 0) {
+          throw (new Error('bcrypt_pbkdf function returned ' +
+              'failure, parameters invalid'));
+        }
+        out = Buffer.from(out);
+        const ckey = out.slice(0, cinf.keySize);
+        const iv = out.slice(cinf.keySize, cinf.keySize + cinf.blockSize);
+
+        const cipherStream = crypto.createCipheriv('aes-256-ctr', ckey, iv);
+        cipherStream.setAutoPadding(false);
+        let chunk;
+        const chunks = [];
+        cipherStream.once('error', e => {
+          throw e;
+        });
+        cipherStream.write(privBuf);
+        cipherStream.end();
+        while((chunk = cipherStream.read()) !== null) {
+          chunks.push(chunk);
+        }
+        privBuf = Buffer.concat(chunks);
+      }
+
+      let buf = new SSHBuffer({});
+
+      buf.writeCString(MAGIC);
+      buf.writeString(cipher); // cipher
+      buf.writeString(kdf); // key derivation function
+      buf.writeBuffer(kdfopts); // kdfoptions
+
+      buf.writeInt(1); // number of keys
+
+      // write public key
+      buf.writeBuffer(publicKeyBuf);
+
+      // write private key
+      buf.writeBuffer(privBuf);
+
+      buf = buf.toBuffer();
+
+      const header = 'OPENSSH PRIVATE KEY';
+
+      const tmp = buf.toString('base64');
+      const len = tmp.length + (tmp.length / 70) +
+          18 + 16 + header.length * 2 + 10;
+      buf = Buffer.alloc(len);
+      let o = 0;
+      o += buf.write('-----BEGIN ' + header + '-----\n', o);
+      for(let i = 0; i < tmp.length;) {
+        let limit = i + 70;
+        if(limit > tmp.length) {
+          limit = tmp.length;
+        }
+        o += buf.write(tmp.slice(i, limit), o);
+        buf[o++] = 10;
+        i = limit;
+      }
+      o += buf.write('-----END ' + header + '-----\n', o);
+
+      // write private key file
+      fs.writeFileSync(path.join(homedir, '.ssh', did), buf.slice(0, o));
+      // set permissions for private key file
+      fs.chmodSync(path.join(homedir, '.ssh', did), '400');
+      console.log('ssh key files were written successfully.');
+    }
+  });
+}
+
+generate().catch(e => {
+  console.error(e);
+  process.exit(1);
+});

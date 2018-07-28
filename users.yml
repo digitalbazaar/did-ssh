@@ -1,0 +1,10 @@
+# single linux user, single DID
+# <linux-username>: <did>
+# bob: did:v1:test:nym:2UAFm4kUpR7mgag9t4ak7Zjr27sDZZX5SSjdDP6rcx8J
+
+# single linux user, multiple DIDs
+# <linux-username>: [<did1>, <did2>]
+# bob: [
+#   did:v1:test:nym:2UAFm4kUpR7mgag9t4ak7Zjr27sDZZX5SSjdDP6rcx8J,
+#   did:v1:test:nym:9j57MqrRqsyDEdpUksbPqhABBdAe9Q2uPcHh8fxwYQrg
+# ]
