@@ -162,4 +162,7 @@ async function generate() {
   });
 }
 
-generate();
+generate().catch(e => {
+  console.error(e);
+  process.exit(1);
+});

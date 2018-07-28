@@ -45,12 +45,10 @@ if(!users[user]) {
 
 const dids = [].concat(users[user]);
 
-try {
-  run();
-} catch(e) {
+run().catch(e => {
   console.error(e);
   process.exit(1);
-}
+});
 
 async function run() {
   const promises = dids.map(did => v1.get({did, mode: 'test'}));
